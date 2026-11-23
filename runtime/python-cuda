@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -eo pipefail
+runtime_dir="$(cd -- "$(dirname -- "$0")" && pwd)"
+source "$runtime_dir/model_env.sh"
+cuda_lib="$CUDA_HOME/targets/aarch64-linux/lib"
+export LD_PRELOAD="$cuda_lib/libcublasLt.so.12:$cuda_lib/libcublas.so.12${LD_PRELOAD:+:$LD_PRELOAD}"
+ulimit -c 0
+exec "$runtime_dir/venv/bin/python" "$@"

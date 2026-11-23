@@ -1,0 +1,6 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>登录管道巡检台</title><link rel="stylesheet" href="/style.css"></head>
+<body class="login-body"><main class="login-shell"><header class="brand"><span class="mark" aria-hidden="true">◎</span><div><strong>管道巡检台</strong><small>Jetson</small></div></header>
+<section class="login-card"><h1>登录巡检台</h1><p id="login-note" role="status">{{MESSAGE}}</p>
+<form method="post" action="/login"><label for="device-password">设备密码</label><input id="device-password" type="password" name="password" required maxlength="256" autocomplete="current-password" aria-describedby="login-note" {{LOCKED}}><button type="submit" class="primary" {{LOCKED}}>登录</button></form></section>
+<p class="login-network">请连接无人机所在的局域网，或使用已获授权的 Tailscale 网络。</p></main></body></html>
