@@ -18,12 +18,14 @@ from catalog import Catalog,file_in
 from web_auth import PasswordGate
 from bag_replay import BagCatalog
 from replay_predictions import Predictions
-from live import Live,MODELS,TOPICS
+from recording_downloads import (ArchiveBusy, ArchiveSpace, archive_name, imported_frames,
+                                 prediction_frames, workspace, zip_rosbag, zip_track)
+from live import JPEG_FEEDS, Live, MODELS, TOPICS
 
 ROOT=Path(__file__).resolve().parent
 LOCAL=re.compile(r'(?:localhost|127\.0\.0\.1)(?::[0-9]{1,5})?\Z')
 ASSETS={'/':'index.html','/style.css':'style.css','/app.js':'app.js','/viewer.js':'viewer.js'}
-KINDS={'yolo':'image/jpeg','video':'image/jpeg','cloud':'application/octet-stream','segment':'application/octet-stream',
+KINDS={**dict.fromkeys(JPEG_FEEDS, 'image/jpeg'), 'cloud':'application/octet-stream','segment':'application/octet-stream',
        'detections':'application/json','summary':'application/json'}
 
 class InspectionHTTP(ThreadingHTTPServer):
@@ -220,6 +222,8 @@ class Handler(BaseHTTPRequestHandler):
                 normal=[dict(id=x['id'],title=x['title'],demo=x['demo'],video=bool(x['videos']),cloud=bool(x['clouds'])) for x,_,_ in catalog.values() if x['id'] not in bags]
                 native=[dict(id=b.id,title=b.title,demo=False,video=False,cloud=True,kind='rosbag2',frames=b.count) for b in bags.values()]
                 self.reply(200,{'sessions':native+normal,'invalid':err,'bagsSkipped':len(skipped)})
+            elif len(parts)==6 and parts[3]=='downloads':
+                self.serve_download(parts, catalog, bags)
             elif parts[2] in bags:
                 self.serve_bag(parts,bags[parts[2]],aligned)
             else:
@@ -271,11 +275,71 @@ class Handler(BaseHTTPRequestHandler):
             self.log_error('Bag %s: %s',bag.id,type(exc).__name__)
             self.reply(422,{'error':'could not decode recorded PointCloud2'})
 
-    def video(self,path):
+    def serve_download(self, parts, catalog, bags):
+        _, _, session, _, kind, track = parts
+        if kind not in ('visible', 'infrared', 'pointcloud'):
+            raise KeyError('unknown download type')
+        if self.headers.get('Sec-Fetch-Site') not in (None, 'same-origin', 'none'):
+            self.reply(403, {'error':'download must be requested from this site'})
+            return
+        filename = archive_name(session, kind, track, 'zip' if kind=='pointcloud' else 'mp4')
+        root = self.server.catalog.root
+        if session in bags:
+            if kind != 'pointcloud' or track not in ('body', 'pointnext'):
+                raise KeyError('unknown bag track')
+            bag = bags[session]
+            if track == 'body':
+                required = 2 * sum(part.stat().st_size for part in bag.parts)
+                prepare = lambda directory: zip_rosbag(bag, directory)
+            else:
+                path = self.server.predictions.destination(bag)
+                if not path.is_file():
+                    raise FileNotFoundError('prediction not finalized')
+                required = path.stat().st_size
+                index = self.server.bags.index(bag)
+                public = index.session
+                item = dict(public['clouds'][0], id='pointnext', label='PointNeXt 分割', segmented=True)
+                prepare = lambda directory: zip_track(directory, public, item, prediction_frames(path))
+        else:
+            public, refs, base = catalog[session]
+            if base.is_symlink() or base.resolve() != base:
+                raise ValueError('invalid session directory')
+            if kind != 'pointcloud':
+                group = 'videos' if kind == 'visible' else 'infrared'
+                path = file_in(base, refs[group][track], '.mp4')
+                if not path.stat().st_size:
+                    raise FileNotFoundError('video empty')
+                self.video(path, filename)
+                return
+            paths = imported_frames(base, refs['clouds'][track])
+            item = next(x for x in public['clouds'] if x['id'] == track)
+            required = sum(path.stat().st_size for path in paths)
+            prepare = lambda directory: zip_track(directory, public, item, paths)
+        if self.command == 'HEAD':
+            self.send_response(200)
+            self.send_header('Content-Type','application/zip')
+            self.send_header('Content-Disposition',f'attachment; filename="{filename}"')
+            self.send_header('Cache-Control','no-store')
+            self.end_headers()
+            return
+        try:
+            with workspace(root, required) as directory:
+                try:
+                    path = prepare(directory)
+                except (ImportError, RuntimeError, sqlite3.Error):
+                    self.reply(422, {'error':'pointcloud export could not be prepared'})
+                    return
+                self.video(path, filename, kind='application/zip')
+        except ArchiveBusy:
+            self.body(503,'application/json',b'{"error":"another archive is being prepared or downloaded"}',{'Retry-After':'10'})
+        except ArchiveSpace:
+            self.reply(507, {'error':'not enough space for the temporary archive'})
+
+    def video(self,path,filename=None,*,kind='video/mp4'):
         with path.open('rb') as f:
             total=os.fstat(f.fileno()).st_size
             lo,hi,status=0,total-1,200
-            r=self.headers.get('Range')
+            r=self.headers.get('Range') if kind=='video/mp4' else None
             if r is not None:
                 m=re.fullmatch(r'bytes=([0-9]{0,20})-([0-9]{0,20})',r)
                 if m and any(m.groups()) and total:
@@ -292,10 +356,11 @@ class Handler(BaseHTTPRequestHandler):
                     return
             remaining=hi-lo+1
             self.send_response(status)
-            self.send_header('Content-Type','video/mp4')
+            self.send_header('Content-Type',kind)
             self.send_header('Content-Length',str(remaining))
-            self.send_header('Accept-Ranges','bytes')
-            self.send_header('Cache-Control','no-cache')
+            if kind=='video/mp4':self.send_header('Accept-Ranges','bytes')
+            if filename:self.send_header('Content-Disposition',f'attachment; filename="{filename}"')
+            self.send_header('Cache-Control','no-store' if filename else 'no-cache')
             if status==206:
                 self.send_header('Content-Range',f'bytes {lo}-{hi}/{total}')
             self.end_headers()

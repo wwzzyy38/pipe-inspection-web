@@ -8,16 +8,23 @@ let scrub=null,exact=null,failedIndex=-2,cachedBytes=0;
 const frames=new Map();
 let predictionBusy=false,predictionRequest=false;
 let liveInfo=null,lastCloud='',lastImage='',imageBlob=null,liveEpoch=0,busy=false;
+let lastInfrared='',infraredBlob=null;
+let sensorView='radar';
+const sensorButtons=document.querySelectorAll('.camera-switch button');
+const showsRadar=()=>sensorView==='all'||sensorView==='radar';
+const showVisibleCamera=()=>sensorView==='all'||sensorView==='visible';
+const showInfraredCamera=()=>sensorView==='all'||sensorView==='infrared';
 const locale=n=>n.toLocaleString('zh-CN');
 const endpoint=(sid,kind,track)=>`/api/sessions/${encodeURIComponent(sid)}/${kind}/${encodeURIComponent(track)}`;
 const msg=(id,text)=>{const el=$(id);if(el.textContent!==text)el.textContent=text;};
 const visible=(id,show)=>{$(id).hidden=!show;};
+function connection(state,text){const el=$('connection');if(el.dataset.state!==state)el.dataset.state=state;msg('connection',text);}
 async function get(url){const r=await fetch(url);if(r.status===401&&location.protocol==='https:')location.assign('/login');if(!r.ok)throw Error(`HTTP ${r.status}`);return r.json();}
 if(location.protocol==='https:'){
  visible('signOut',true);
  $('signOut').onclick=async()=>{
-  try{const r=await fetch('/logout',{method:'POST',headers:{'X-Inspection-Action':'1'},redirect:'manual'});if(r.type==='opaqueredirect'||r.status===401)location.assign('/login');else msg('connection','退出未完成，请重试');}
-  catch{msg('connection','退出未完成，请检查连接');}
+  try{const r=await fetch('/logout',{method:'POST',headers:{'X-Inspection-Action':'1'},redirect:'manual'});if(r.type==='opaqueredirect'||r.status===401)location.assign('/login');else connection('error','退出未完成，请重试');}
+  catch{connection('error','退出未完成，请检查连接');}
  };
 }
 function options(id,choices,wanted=''){const n=$(id);n.replaceChildren(...choices.map(([v,t])=>new Option(t,v)));if(choices.some(([v])=>v===wanted))n.value=wanted;n.disabled=!choices.length;}
@@ -62,13 +69,55 @@ async function loadReference(obj,nonce){
 $('cloudSpace').onchange=()=>{preferredSpace=$('cloudSpace').value;changeSpace(preferredSpace);};
 $('showGrid').onchange=referenceUI;
 for(const b of document.querySelectorAll('[data-view]'))b.onclick=()=>viewer.view(b.dataset.view);
-function renderList(){const items=sessions.map(s=>{const b=document.createElement('button'),sub=document.createElement('small');b.textContent=s.title;b.dataset.session=s.id;b.setAttribute('aria-current',String(s.id===selected));sub.textContent=s.kind==='rosbag2'?`ROS 2 bag / ${locale(s.frames)} 帧`:[s.demo?'演示':'实录',s.cloud?'点云':'',s.video?'视频':''].filter(Boolean).join(' / ');b.append(sub);b.onclick=()=>choose(s.id);return b;});$('sessions').replaceChildren(...items);}
+function renderList(){
+ const shelf=$('sessions'),scroll=shelf.scrollTop,focused=shelf.contains(document.activeElement)?document.activeElement.dataset.session:null;
+ const items=sessions.map(s=>{
+  const b=document.createElement('button'),sub=document.createElement('small');
+  b.type='button';b.textContent=s.title;b.dataset.session=s.id;b.setAttribute('aria-current',String(s.id===selected));
+  sub.textContent=s.kind==='rosbag2'?`ROS 2 bag / ${locale(s.frames)} 帧`:[s.demo?'演示':'实录',s.cloud?'点云':'',s.video?'视频':''].filter(Boolean).join(' / ');
+  b.append(sub);b.onclick=()=>choose(s.id);return b;
+ });
+ shelf.replaceChildren(...items);shelf.scrollTop=scroll;
+ if(focused)items.find(b=>b.dataset.session===focused)?.focus({preventScroll:true});
+ msg('sessionCount',locale(sessions.length));visible('sessionCount',sessions.length>0);
+}
 async function reload(){try{const data=await get('/api/sessions');sessions=data.sessions.sort((a,b)=>Number(a.demo)-Number(b.demo));const notes=[];if(data.bagsSkipped)notes.push(`${data.bagsSkipped} 段 bag 尚不可播放`);if(data.invalid.length)notes.push(`${data.invalid.length} 个无效清单`);msg('listNote',notes.join(' / ')||(sessions.length?'':'没有可播放的机上记录。'));renderList();if(mode==='replay'){const chosen=sessions.some(s=>s.id===selected)?selected:sessions[0]?.id;await choose(chosen||'');}}catch{msg('listNote','无法读取飞机记录。');}}
 async function choose(id){const nonce=++selection;selected=id;renderList();if(mode!=='replay')return;session=null;space='body';reference=null;preferredSpace=null;referenceUI();configureReplay();if(!id)return;
  if(sessions.find(x=>x.id===id)?.kind==='rosbag2'){emptyCloud('正在读取 bag 时间索引…');msg('cloudMeta','只读读取 /cloud_registered_body');}
  try{const result=await get(`/api/sessions/${encodeURIComponent(id)}`);if(nonce===selection&&mode==='replay'){session=result;if(result.kind==='rosbag2')reference={pending:true};referenceUI();configureReplay();loadReference(result,nonce);}}
  catch{if(nonce===selection&&mode==='replay'){msg('listNote','无法打开该会话。请确认记录已结束且所有分卷齐全。');emptyCloud('无法读取这段录制');msg('cloudMeta','未加载');}}
 }
+function updateDownloads(){
+ const ir=session?.infrared??[];
+ const pick=$('infraredTrack');
+ if(pick.dataset.session!==(session?.id??'')){
+  options('infraredTrack',ir.map(t=>[t.id,t.label]));pick.dataset.session=session?.id??'';
+ }
+ const currentInfrared=ir.find(t=>t.id===pick.value);
+ const replay=mode==='replay';
+ const groups=[['cloud','pointcloud',ct,'此记录没有点云轨道','ZIP · 录制坐标'],
+               ['video','visible',vt,'此记录没有可见光录像','原始 MP4'],
+               ['infrared','infrared',currentInfrared,'此记录没有红外录像','原始 MP4']];
+ for(const [prefix,kind,track,empty,ready] of groups){
+  visible(`${prefix}Downloads`,replay);
+  const link=$(`${prefix}Download`),available=replay&&!!session?.id&&!!track;
+  if(available)link.href=`${endpoint(session.id,'downloads',kind)}/${encodeURIComponent(track.id)}`;
+  else link.removeAttribute('href');
+  link.setAttribute('aria-disabled',String(!available));
+  msg(`${prefix}DownloadNote`,!session?'选择记录后下载':available?ready:empty);
+ }
+ visible('infraredTrackLabel',replay&&ir.length>1);
+ if(replay){
+  msg('infraredStatus',currentInfrared?'可下载':'无录像');
+  msg('infraredEmptyText','尚无红外图像');
+  msg('infraredMeta',currentInfrared?'已登记红外录像，本页暂不预览':'此记录没有红外录像');
+ }else{
+  msg('infraredStatus','等待画面');
+  msg('infraredEmptyText','等待红外图像');
+  msg('infraredMeta','等待红外相机发布 JPEG');
+ }
+}
+$('infraredTrack').onchange=updateDownloads;
 function clearVideo(){player.pause();player.removeAttribute('src');player.load();visible('player',false);}
 function configureReplay(){options('cloudTrack',(session?.clouds||[]).map(x=>[x.id,x.label]));options('videoTrack',(session?.videos||[]).map(x=>[x.id,x.label]));visible('badge',!!session?.demo);setTracks(true);visible('predictionPanel',mode==='replay'&&session?.kind==='rosbag2');if(session?.kind==='rosbag2'){msg('predictionStatus','正在检查分割结果…');$('predictionAction').disabled=true;}predictionPoll();}
 function setTracks(resetVideo,preserve=false,recenter=false){
@@ -77,6 +126,7 @@ function setTracks(resetVideo,preserve=false,recenter=false){
  ct=session?.clouds.find(x=>x.id===$('cloudTrack').value)||null;vt=session?.videos.find(x=>x.id===$('videoTrack').value)||null;
  if(resetVideo){clearVideo();if(vt){player.src=endpoint(selected,'video',vt.id);player.playbackRate=Number($('speed').value);visible('player',true);}}
  visible('videoEmpty',!vt);msg('videoEmpty',session?'此会话没有视频':'选择视频记录');msg('videoMeta',vt?vt.label:'没有视频轨道');
+ updateDownloads();
  emptyCloud(ct?'载入点云帧…':session?'此会话没有点云':'选择点云记录',!preserve||recenter);if(!preserve||recenter)viewer.reset();msg('cloudMeta',ct?ct.frame:'没有点云轨道');
  msg('syncNote',session?.kind==='rosbag2'?'直接读取机上 ROS 2 bag 的 /cloud_registered_body，不做地图拼接。拖动下方时间轴可跳到指定时刻。':synced()?'有共同采集时间基准。拖动共享时间轴或视频进度条，两路一起跳转。':'没有共同时间基准。点云与视频各自播放，视频可拖动自己的进度条。');
  msg('timeTitle',synced()?'共享时间轴':'点云时间轴');if(preserve){jump(Math.min(t,duration()),resume);}else{updateTime();requestFrame();}
@@ -116,7 +166,8 @@ function showFrame(idx,buf){
  finishExact(idx);
 }
 async function requestFrame(){
- if(mode!=='replay'||!ct)return;
+ if(mode!=='replay')return;
+ if(!ct||!showsRadar()){if(exact)finishExact(exact.index);return;}
  const idx=exact?.index??targetFrame();
  if(idx===frameIndex||idx===failedIndex){finishExact(idx);return;}
  if(idx<0){emptyCloud('此时刻没有点云');frameIndex=-1;finishExact(idx);return;}
@@ -185,12 +236,48 @@ $('speed').onchange=()=>{player.playbackRate=Number($('speed').value);};$('reset
 player.addEventListener('loadedmetadata',()=>{if(vt&&mode==='replay'){msg('videoMeta',`${vt.label} / ${player.videoWidth}×${player.videoHeight}`);updateTime();}});
 player.addEventListener('error',()=>{if(mode==='replay'&&vt){msg('videoMeta','无法播放。请检查视频文件和编码（推荐 H.264 MP4）。');}});
 const stateText={online:'输出在线',not_configured:'未配置',starting:'正在启动',waiting:'等待输出',stale:'输出过期',failed:'进程失败',no_source:'等待输入',idle:'待启动',ros_unavailable:'ROS 未连接'};
-function selectMode(which){if(mode===which)return;mode=which;liveEpoch++;mediaEpoch++;resetFrameQueue();space='body';reference=null;preferredSpace=null;referenceKey='';referenceUI();clearVideo();clearImage();emptyCloud('等待数据…',true);viewer.reset();lastCloud='';lastImage='';
- const live=mode==='live';$('tabReplay').setAttribute('aria-pressed',String(!live));$('tabLive').setAttribute('aria-pressed',String(live));for(const id of ['library','replayNote','timeline'])visible(id,!live);visible('modelPanel',live);visible('badge',false);visible('predictionPanel',false);
+function selectMode(which){if(mode===which)return;mode=which;liveEpoch++;mediaEpoch++;resetFrameQueue();space='body';reference=null;preferredSpace=null;referenceKey='';referenceUI();clearVideo();clearImage();clearInfrared();emptyCloud('等待数据…',true);viewer.reset();lastCloud='';lastImage='';
+ const live=mode==='live';$('tabReplay').setAttribute('aria-pressed',String(!live));$('tabLive').setAttribute('aria-pressed',String(live));for(const id of ['library','replayNote','timeline'])visible(id,!live);visible('modelPanel',live);visible('badge',false);visible('predictionPanel',false);updateDownloads();
  msg('title',live?'实时识别':'记录回放');msg('subtitle',live?'查看机载相机、点云与实时识别输出。':'选择会话，回看管内图像和三维点云。');
  if(live){options('cloudTrack',[['cloud','原始点云'],['segment','分割结果']]);options('videoTrack',[['video','原始画面'],['yolo','YOLO 结果']]);renderModels();livePoll();}else choose(selected);
 }
 function clearImage(){if(imageBlob){URL.revokeObjectURL(imageBlob);imageBlob=null;}$('liveImage').removeAttribute('src');visible('liveImage',false);}
+function clearInfrared(){
+ if(infraredBlob){URL.revokeObjectURL(infraredBlob);infraredBlob=null;}
+ lastInfrared='';$('infraredImage').removeAttribute('src');visible('infraredImage',false);visible('infraredEmpty',true);
+}
+function infraredUnavailable(feed){
+ clearInfrared();
+ msg('infraredStatus',feed?.publisher?'等待画面':'离线');
+ msg('infraredEmptyText',feed?.publisher?'等待新的红外图像':'未收到红外图像');
+ msg('infraredMeta',feed?.publisher?'红外话题在线，等待新帧':'没有红外图像发布者');
+}
+function setSensorView(next){
+ if(next===sensorView||!['all','radar','visible','infrared'].includes(next))return;
+ sensorView=next;
+ $('workbenchBoard').dataset.sensorView=next;
+ visible('radarPanel',showsRadar());
+ visible('visiblePanel',showVisibleCamera());
+ visible('infraredPanel',showInfraredCamera());
+ for(const button of sensorButtons)button.setAttribute('aria-pressed',String(button.dataset.sensorView===next));
+ if(mode==='live'){
+  liveEpoch++;
+  if(!showsRadar()){lastCloud='';emptyCloud('等待雷达点云');}
+  if(!showVisibleCamera()){lastImage='';clearImage();visible('videoEmpty',true);msg('videoEmpty','等待可见光画面');}
+  if(!showInfraredCamera())clearInfrared();
+  livePoll();
+ }else{
+  if(!showsRadar())abortFrame();
+  requestFrame();
+ }
+}
+for(const button of sensorButtons)button.onclick=()=>setSensorView(button.dataset.sensorView);
+function showInfrared(blob,id,feed){
+ const old=infraredBlob;infraredBlob=URL.createObjectURL(blob);$('infraredImage').src=infraredBlob;
+ if(old)URL.revokeObjectURL(old);
+ lastInfrared=id;visible('infraredImage',true);visible('infraredEmpty',false);
+ msg('infraredStatus','实时');msg('infraredMeta',`红外画面 / ${feed.stamp||'无时间戳'}`);
+}
 $('tabReplay').onclick=()=>selectMode('replay');$('tabLive').onclick=()=>selectMode('live');
 $('cloudTrack').onchange=()=>{if(mode==='live'){liveEpoch++;lastCloud='';emptyCloud('等待此轨道数据…',true);viewer.reset();}else setTracks(false,true);};
 $('videoTrack').onchange=()=>{if(mode==='live'){liveEpoch++;lastImage='';clearImage();visible('videoEmpty',true);}else setTracks(true);};
@@ -207,12 +294,15 @@ async function livePoll(){
    if(next==='start'&&hadReference&&r?.available){lastCloud='';emptyCloud('等待新的起始坐标…',true);viewer.reset();}
    referenceUI();
   }
-  msg('connection',st.ros?'ROS 2 已连接':'ROS 2 未连接');const ck=$('cloudTrack').value,vk=$('videoTrack').value,c=st.feeds[ck],v=st.feeds[vk];
-  const fetchLatest=async(kind,feed,version,apply,unavailable)=>{if(!feed?.available){unavailable();return;}if(version===feed.version)return;const aligned=space==='start'&&(kind==='cloud'||kind==='segment');const r=await fetch(`/api/live/${kind}${aligned?'?space=start':''}`);if(r.status!==200){if(aligned&&r.status===422&&epoch===liveEpoch){viewer.setReference(false);msg('cloudMeta','该帧缺少同步位姿');}return;}const data=kind==='cloud'||kind==='segment'?await r.arrayBuffer():await r.blob();if(epoch===liveEpoch&&mode==='live')apply(data,r.headers.get('X-Frame-Version'));};
+  connection(st.ros?'ready':'paused',st.ros?'ROS 2 已连接':'ROS 2 未连接');const ck=$('cloudTrack').value,vk=$('videoTrack').value,c=st.feeds[ck],v=st.feeds[vk],ir=st.feeds.thermal;
+  const fetchLatest=async(kind,feed,version,apply,unavailable)=>{if(!feed?.available){unavailable();return;}if(version===feed.version)return;const aligned=space==='start'&&(kind==='cloud'||kind==='segment');const r=await fetch(`/api/live/${kind}${aligned?'?space=start':''}`);if(r.status!==200){if(kind==='thermal'&&epoch===liveEpoch&&mode==='live')unavailable();if(aligned&&r.status===422&&epoch===liveEpoch){viewer.setReference(false);msg('cloudMeta','该帧缺少同步位姿');}return;}const data=kind==='cloud'||kind==='segment'?await r.arrayBuffer():await r.blob();if(epoch===liveEpoch&&mode==='live')apply(data,r.headers.get('X-Frame-Version'));};
   await Promise.allSettled([
-   fetchLatest(ck,c,lastCloud,(b,id)=>{draw(b,`${space==='start'?'起始坐标':c.frame||'未注明坐标系'} / ${c.stamp||'无时间戳'}`,ck==='segment');lastCloud=id;},()=>{lastCloud='';emptyCloud(c?.publisher?'已发现话题，等待有效点云':'没有点云发布者');msg('cloudMeta','无实时点云');}),
-   fetchLatest(vk,v,lastImage,(b,id)=>{const old=imageBlob;imageBlob=URL.createObjectURL(b);$('liveImage').src=imageBlob;if(old)URL.revokeObjectURL(old);visible('liveImage',true);visible('videoEmpty',false);msg('videoMeta',`${vk==='yolo'?'YOLO 带框预览':'相机画面'} / ${v.stamp||'无时间戳'}`);lastImage=id;},()=>{lastImage='';clearImage();visible('videoEmpty',true);msg('videoEmpty',v?.publisher?'已发现话题，等待有效画面':'没有图像发布者');msg('videoMeta','无实时视频');})]);
- }catch{if(mode==='live'){msg('connection','与飞机网页的连接中断');msg('modelNote','恢复连接后可重试。');clearImage();visible('videoEmpty',true);msg('videoEmpty','连接中断');emptyCloud('连接中断');lastCloud='';lastImage='';}}
+   showsRadar()&&fetchLatest(ck,c,lastCloud,(b,id)=>{draw(b,`${space==='start'?'起始坐标':c.frame||'未注明坐标系'} / ${c.stamp||'无时间戳'}`,ck==='segment');lastCloud=id;},()=>{lastCloud='';emptyCloud(c?.publisher?'已发现话题，等待有效点云':'没有点云发布者');msg('cloudMeta','无实时点云');}),
+   showVisibleCamera()&&fetchLatest(vk,v,lastImage,(b,id)=>{const old=imageBlob;imageBlob=URL.createObjectURL(b);$('liveImage').src=imageBlob;if(old)URL.revokeObjectURL(old);visible('liveImage',true);visible('videoEmpty',false);msg('videoMeta',`${vk==='yolo'?'YOLO 带框预览':'相机画面'} / ${v.stamp||'无时间戳'}`);lastImage=id;},()=>{lastImage='';clearImage();visible('videoEmpty',true);msg('videoEmpty',v?.publisher?'已发现话题，等待有效画面':'没有图像发布者');msg('videoMeta','无实时视频');}),
+   showInfraredCamera()&&fetchLatest('thermal',ir,lastInfrared,(b,id)=>showInfrared(b,id,ir),()=>infraredUnavailable(ir)).catch(()=>{
+    if(epoch===liveEpoch&&mode==='live')infraredUnavailable(ir);
+   })]);
+ }catch{if(mode==='live'){connection('error','与飞机网页的连接中断');msg('modelNote','恢复连接后可重试。');clearImage();visible('videoEmpty',true);msg('videoEmpty','连接中断');infraredUnavailable(null);msg('infraredMeta','与飞机网页的连接中断');emptyCloud('连接中断');lastCloud='';lastImage='';}}
  finally{busy=false;}
 }
 const predWords={
@@ -272,5 +362,5 @@ $('predictionAction').onclick=async()=>{
 };
 setInterval(predictionPoll,850);
 requestAnimationFrame(tick);setInterval(livePoll,210);
-get('/api/live/status').then(x=>msg('connection',x.ros?'ROS 2 已连接':'工作台在线 / ROS 2 未连接')).catch(()=>msg('connection','工作台连接失败'));
+get('/api/live/status').then(x=>connection(x.ros?'ready':'paused',x.ros?'ROS 2 已连接':'ROS 2 未连接')).catch(()=>connection('error','工作台连接失败'));
 reload();

@@ -1,13 +1,162 @@
 <!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Jetson · 管道巡检</title><link rel="stylesheet" href="/style.css"><script type="module" src="/app.js"></script></head>
-<body>
-<header class="top"><div class="brand"><span class="mark" aria-hidden="true">◎</span><div><strong>管道巡检台</strong><small>Jetson</small></div></div><nav aria-label="工作模式"><button id="tabReplay" aria-pressed="true">记录回放</button><button id="tabLive" aria-pressed="false">实时识别</button></nav><div class="top-access"><div id="connection">连接工作台…</div><button id="signOut" type="button" hidden>退出</button></div></header>
-<main><div class="heading"><div><h1 id="title">记录回放</h1><p id="subtitle">选择会话，回看管内图像和三维点云。</p></div><span id="badge" hidden>演示数据</span></div>
-<div class="board">
-<aside class="library" id="library"><div class="bar"><h2>机上记录</h2><button id="reload" title="刷新记录" aria-label="刷新记录">↻</button></div><div id="sessions"></div><p class="aside-note" id="listNote"></p></aside>
-<section class="cloud panel"><div class="bar"><h2>三维点云</h2><div class="cloud-options"><label class="label">坐标 <select id="cloudSpace"><option value="body">原始坐标</option><option value="start" disabled>起始坐标</option></select></label><label class="label">轨道 <select id="cloudTrack"></select></label></div></div><div class="scene"><canvas id="viewer" aria-label="方向键旋转，正负号缩放，Home 复位" tabindex="0"></canvas><div id="cloudEmpty" class="empty">选择点云记录</div><div class="view-shortcuts" aria-label="点云视角"><button type="button" data-view="front">正视</button><button type="button" data-view="top">俯视</button><button type="button" data-view="bottom">底视</button></div><button id="reset" class="reset">复位视角</button></div><div class="foot"><span id="cloudMeta">尚未加载</span><span>左拖旋转 / 右拖或中键平移 / 滚轮对准光标缩放</span></div><div class="reference-row"><span id="referenceNote">起始参考面未加载</span><label><input id="showGrid" type="checkbox" checked disabled>显示 XY 参考面</label></div><div id="predictionPanel" class="prediction" hidden><div><strong>PointNeXt 分割</strong><span id="predictionStatus" role="status"></span><progress id="predictionProgress" value="0" max="1" aria-label="分割生成进度" hidden></progress></div><button id="predictionAction" type="button">生成分割结果</button></div><div id="legend" class="legend" hidden></div></section>
-<div class="column"><section class="panel"><div class="bar"><h2>巡检视频</h2><label class="label">轨道 <select id="videoTrack"></select></label></div><div class="video"><video id="player" preload="metadata" playsinline controls hidden></video><img id="liveImage" alt="飞机实时画面" hidden><p id="videoEmpty" class="empty">选择视频记录</p></div><div class="foot" id="videoMeta">尚未加载</div></section>
-<section class="panel" id="modelPanel" hidden><div class="bar"><h2>机载识别</h2></div><div id="modelRows"></div><p id="modelNote" class="aside-note" role="status"></p></section>
-<section class="panel note" id="replayNote"><h2>回放说明</h2><p id="syncNote">载入记录后可拖动时间轴，跳到任意时刻。</p></section></div></div>
-<section class="panel timeline" id="timeline"><div class="transport"><h2 id="timeTitle">点云时间轴</h2><button id="play" class="primary" disabled>播放</button><button id="begin" disabled>回到起点</button><label class="label">速度 <select id="speed"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option></select></label><output id="clock">00:00.0 / 00:00.0</output></div><input id="seek" type="range" min="0" max="1" step="0.01" value="0" aria-label="点云回放时间" disabled></section>
-</main></body></html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>管道巡检台 · Jetson</title>
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body class="workbench">
+  <header class="top">
+    <div class="brand">
+      <span class="mark" aria-hidden="true"><svg viewBox="0 0 32 32" fill="none"><circle cx="16" cy="16" r="10"/><circle cx="16" cy="16" r="5"/><path d="M16 3v4m13 9h-4M16 29v-4M3 16h4"/></svg></span>
+      <div><strong>管道巡检台</strong><small>Jetson 机载端</small></div>
+    </div>
+    <nav class="mode-switch" aria-label="工作模式">
+      <button id="tabReplay" type="button" aria-pressed="true">记录回放</button>
+      <button id="tabLive" type="button" aria-pressed="false">实时识别</button>
+    </nav>
+    <div class="top-access">
+      <span id="connection" class="connection" data-state="waiting" role="status">正在连接</span>
+      <button id="signOut" type="button" hidden>退出</button>
+    </div>
+  </header>
+
+  <main class="workspace">
+    <div class="heading">
+      <div><h1 id="title">记录回放</h1><p id="subtitle">选择一段录制，回看管内影像与三维点云。</p></div>
+      <span id="badge" class="badge" hidden>演示数据</span>
+    </div>
+    <div class="board" id="workbenchBoard" data-sensor-view="radar">
+      <aside class="library" id="library" aria-labelledby="libraryTitle">
+        <div class="bar">
+          <div class="panel-title"><h2 id="libraryTitle">机上记录</h2><span id="sessionCount" class="record-count" hidden></span></div>
+          <button class="icon-button" id="reload" type="button" title="刷新记录" aria-label="刷新记录">
+            <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M19 8a8 8 0 1 0 1 7M19 4v5h-5"/></svg>
+          </button>
+        </div>
+        <div id="sessions"></div>
+        <p class="aside-note" id="listNote"></p>
+      </aside>
+
+      <aside class="camera-display" aria-labelledby="cameraDisplayTitle">
+        <h2 id="cameraDisplayTitle">画面选择</h2>
+        <div class="camera-switch" role="group" aria-labelledby="cameraDisplayTitle">
+          <button type="button" data-sensor-view="all" aria-pressed="false" aria-controls="radarPanel visiblePanel infraredPanel">全部</button>
+          <button type="button" data-sensor-view="radar" aria-pressed="true" aria-controls="radarPanel">雷达</button>
+          <button type="button" data-sensor-view="visible" aria-pressed="false" aria-controls="visiblePanel">可见光</button>
+          <button type="button" data-sensor-view="infrared" aria-pressed="false" aria-controls="infraredPanel">红外</button>
+        </div>
+      </aside>
+
+      <div class="survey-column">
+        <div class="radar-stack">
+          <section id="radarPanel" class="cloud panel" aria-labelledby="cloudTitle">
+            <div class="bar">
+              <div class="panel-title">
+                <svg class="panel-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3 21 8v8l-9 5-9-5V8l9-5Zm0 9 9-4m-9 4L3 8m9 4v9"/></svg>
+                <h2 id="cloudTitle">雷达点云</h2>
+              </div>
+              <div class="cloud-options">
+                <label class="label">坐标 <select id="cloudSpace"><option value="body">原始坐标</option><option value="start" disabled>起始坐标</option></select></label>
+                <label class="label">轨道 <select id="cloudTrack"></select></label>
+              </div>
+            </div>
+            <div class="scene">
+              <canvas id="viewer" aria-label="方向键旋转，正负号缩放，Home 复位" tabindex="0"></canvas>
+              <div id="cloudEmpty" class="empty">选择一段点云记录</div>
+              <div class="view-shortcuts" role="group" aria-label="点云视角">
+                <button type="button" data-view="front">正视</button><button type="button" data-view="top">俯视</button><button type="button" data-view="bottom">底视</button>
+              </div>
+              <button id="reset" class="reset" type="button">复位视角</button>
+            </div>
+            <div class="reference-row">
+              <span id="referenceNote">起始参考面未加载</span>
+              <label><input id="showGrid" type="checkbox" checked disabled>显示 XY 参考面</label>
+            </div>
+            <div class="foot cloud-foot"><span id="cloudMeta">尚未加载</span><span>左拖旋转 · 右拖或中键平移 · 滚轮缩放</span></div>
+            <div class="download-row" id="cloudDownloads">
+              <span id="cloudDownloadNote">选择点云轨道后可下载</span><a id="cloudDownload" class="download-action" download aria-disabled="true" aria-describedby="cloudDownloadNote">下载点云</a>
+            </div>
+            <div id="predictionPanel" class="prediction" hidden>
+              <div><strong>PointNeXt 分割</strong><span id="predictionStatus" role="status"></span><progress id="predictionProgress" value="0" max="1" aria-label="分割生成进度" hidden></progress></div>
+              <button id="predictionAction" type="button">生成分割结果</button>
+            </div>
+            <div id="legend" class="legend" hidden></div>
+          </section>
+
+          <section class="panel timeline" id="timeline" aria-labelledby="timeTitle">
+            <div class="transport">
+              <h2 id="timeTitle">点云时间轴</h2>
+              <div class="transport-actions">
+                <button id="play" class="primary" type="button" disabled>播放</button>
+                <button id="begin" type="button" disabled>回到起点</button>
+                <label class="label">速度 <select id="speed"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option></select></label>
+              </div>
+              <output id="clock">00:00.0 / 00:00.0</output>
+            </div>
+            <input id="seek" type="range" min="0" max="1" step="0.01" value="0" aria-label="点云回放时间" disabled>
+          </section>
+        </div>
+
+        <div class="camera-stack">
+          <section id="visiblePanel" class="panel sensor-panel" aria-labelledby="visibleTitle" hidden>
+            <div class="bar">
+              <div class="panel-title">
+                <svg class="panel-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="M3 6h13v12H3zM16 10l5-3v10l-5-3"/></svg>
+                <h2 id="visibleTitle">可见光视频</h2>
+              </div>
+              <label class="label">轨道 <select id="videoTrack"></select></label>
+            </div>
+            <div class="video">
+              <video id="player" preload="metadata" playsinline controls hidden></video>
+              <img id="liveImage" alt="飞机实时画面" hidden>
+              <p id="videoEmpty" class="empty">选择视频记录</p>
+            </div>
+            <div class="foot" id="videoMeta">尚未加载</div>
+            <div class="download-row" id="videoDownloads">
+              <span id="videoDownloadNote">选择视频轨道后可下载</span><a id="videoDownload" class="download-action" download aria-disabled="true" aria-describedby="videoDownloadNote">下载可见光</a>
+            </div>
+          </section>
+
+          <section id="infraredPanel" class="panel sensor-panel infrared" aria-labelledby="infraredTitle" hidden>
+            <div class="bar">
+              <div class="panel-title">
+                <svg class="panel-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="M8 20c0-2 2-3 2-5s-2-3-2-5 2-3 2-6m4 16c0-2 2-3 2-5s-2-3-2-5 2-3 2-6"/></svg>
+                <h2 id="infraredTitle">红外相机</h2>
+              </div>
+              <span id="infraredStatus" class="badge badge-reserved" role="status">无录像</span>
+            </div>
+            <div id="infraredViewport" class="video infrared-viewport">
+              <img id="infraredImage" alt="红外相机画面" hidden>
+              <div id="infraredEmpty" class="infrared-empty">
+                <svg aria-hidden="true" viewBox="0 0 64 40" fill="none"><path d="M3 12V3h10m38 0h10v9m0 16v9H51m-38 0H3v-9"/><circle cx="32" cy="20" r="7"/><path d="M22 20h3m14 0h3m-10-10v3m0 14v3"/></svg>
+                <strong id="infraredEmptyText">尚无红外图像</strong>
+              </div>
+            </div>
+            <div id="infraredMeta" class="foot">此记录没有红外录像</div>
+            <div class="download-row" id="infraredDownloads">
+              <span id="infraredDownloadNote">此记录没有红外录像</span>
+              <label class="label" id="infraredTrackLabel" hidden>轨道 <select id="infraredTrack"></select></label>
+              <a id="infraredDownload" class="download-action" download aria-disabled="true" aria-describedby="infraredDownloadNote">下载红外</a>
+            </div>
+          </section>
+        </div>
+      </div>
+
+      <div class="column">
+        <section class="panel" id="modelPanel" aria-labelledby="modelsTitle" hidden>
+          <div class="bar"><h2 id="modelsTitle">机载识别</h2></div>
+          <div id="modelRows"></div>
+          <p id="modelNote" class="aside-note" role="status"></p>
+        </section>
+        <section class="panel note" id="replayNote">
+          <h2>回放说明</h2>
+          <p id="syncNote">载入记录后可拖动时间轴，跳到任意时刻。</p>
+        </section>
+      </div>
+    </div>
+  </main>
+</body>
+</html>

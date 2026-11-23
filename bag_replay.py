@@ -27,6 +27,12 @@ class Bag:
     count: int
     fingerprint: tuple
 
+    def open(self, index):
+        part = self.parts[index]
+        if load_part(self.path, part.name) != part or identity(part) != self.fingerprint[index + 1]:
+            raise ValueError('source bag changed; refresh playback')
+        return connect(part)
+
     @property
     def title(self):
         stamp = self.id[4:]
@@ -156,10 +162,7 @@ class BagIndex:
                                          frame=frame[:64], segmented=False)])
 
     def open(self, part_index):
-        part = self.bag.parts[part_index]
-        if load_part(self.bag.path, part.name) != part or identity(part) != self.bag.fingerprint[part_index + 1]:
-            raise ValueError('source bag changed; refresh playback')
-        return connect(part)
+        return self.bag.open(part_index)
 
     def message(self, index):
         from rclpy.serialization import deserialize_message

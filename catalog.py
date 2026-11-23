@@ -47,8 +47,8 @@ class Catalog:
     def read(base,m):
         if m.get('version')!=1:
             raise ValueError('unsupported manifest')
-        public=dict(id=base.name,title=str(m.get('title',base.name))[:120],demo=m.get('demo') is True,videos=[],clouds=[])
-        refs={'videos':{},'clouds':{}}
+        public=dict(id=base.name,title=str(m.get('title',base.name))[:120],demo=m.get('demo') is True,videos=[],infrared=[],clouds=[])
+        refs={'videos':{},'infrared':{},'clouds':{}}
         for key in refs:
             entries=m.get(key,{})
             if not isinstance(entries,dict) or len(entries)>8:
@@ -60,7 +60,7 @@ class Catalog:
                 if not isinstance(offset,(int,float)) or not math.isfinite(offset) or abs(offset)>10**7:
                     raise ValueError('invalid offset')
                 item=dict(id=name,label=str(track.get('label',name))[:80],offset=float(offset))
-                if key=='videos':
+                if key in ('videos','infrared'):
                     refs[key][name]=track['file']
                     file_in(base,track['file'],'.mp4')
                 else:

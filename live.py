@@ -10,8 +10,10 @@ from cloud_reference import ODOM_TOPIC, align, match_pose, odom_pose, stamp_ns
 from flight_state import FlightState
 
 TOPICS={'video':'/siyi/camera/image_raw/compressed','yolo':'/pipe_yolo/image/compressed',
+        'thermal':'/thermal/image_raw/compressed',
         'cloud':'/cloud_registered_body','segment':'/pipe_pointcloud/segmented',
         'detections':'/pipe_yolo/detections','summary':'/pipe_pointcloud/summary'}
+JPEG_FEEDS={'video','yolo','thermal'}
 MODELS={'yolo':('pipe_yolo_recognition','video'), 'segment':('pipe_pointcloud_recognition','cloud')}
 CONFIG={
     'yolo': [('python_executable','PIPE_YOLO_PYTHON','yolo-venv/bin/python'),('model','PIPE_YOLO_MODEL','pipe_inspection_web/assets/weights/yolo26m.pt')],
@@ -48,7 +50,7 @@ class Live:
             node=rclpy.create_node('pipe_inspection_web',context=ctx,enable_rosout=False)
             qos=QoSProfile(depth=1,reliability=ReliabilityPolicy.BEST_EFFORT)
             for k,topic in TOPICS.items():
-                msg=CompressedImage if k in ('video','yolo') else PointCloud2 if k in ('cloud','segment') else String
+                msg=CompressedImage if k in JPEG_FEEDS else PointCloud2 if k in ('cloud','segment') else String
                 node.create_subscription(msg,topic,lambda m,k=k:self.collect(k,m),qos)
             from nav_msgs.msg import Odometry
             node.create_subscription(Odometry,ODOM_TOPIC,self.collect_pose,qos)
@@ -78,11 +80,11 @@ class Live:
     def collect(self,k,msg):
         now=time.monotonic()
         prev=self.last.get(k)
-        if prev and now-prev[0]<(.12 if k in ('video','yolo') else .25):
+        if prev and now-prev[0]<(.12 if k in JPEG_FEEDS else .25):
             return
         try:
             extra={}
-            if k in ('video','yolo'):
+            if k in JPEG_FEEDS:
                 data=bytes(msg.data)
                 if len(data)>4000000 or not data.startswith(b'\xff\xd8'):
                     return
