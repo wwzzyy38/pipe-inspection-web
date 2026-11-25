@@ -15,7 +15,7 @@ TOPICS={'video':'/siyi/camera/image_raw/compressed','yolo':'/pipe_yolo/image/com
         'cloud':'/cloud_registered_body','segment':'/pipe_pointcloud/segmented',
         'detections':'/pipe_yolo/detections','summary':'/pipe_pointcloud/summary'}
 JPEG_FEEDS={'video','yolo','thermal'}
-GIMBAL_MIN, GIMBAL_MAX = -25, 25
+GIMBAL_MIN, GIMBAL_MAX = -90, 25
 GIMBAL_FEEDBACK_TTL = 2.0
 GIMBAL_COMMAND_INTERVAL = .4
 MODELS={'yolo':('pipe_yolo_recognition','video'), 'segment':('pipe_pointcloud_recognition','cloud')}

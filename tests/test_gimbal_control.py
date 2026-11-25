@@ -51,7 +51,7 @@ class GimbalControlTest(unittest.TestCase):
 
         self.assertEqual(post('{"angle":5}', {k: v for k, v in h.items() if k != 'Cookie'})[0], 401)
         self.assertEqual(post('{"angle":5}', {**h, 'Origin': 'https://other.invalid'})[0], 403)
-        for body in ('{}', '{"angle":true}', '{"angle":26}', '{"angle":NaN}', '{"angle":"5"}'):
+        for body in ('{}', '{"angle":true}', '{"angle":26}', '{"angle":-91}', '{"angle":NaN}', '{"angle":"5"}'):
             self.assertEqual(post(body)[0], 400, body)
         self.assertEqual(post('{"angle":5}'), (409, {'ok': False, 'detail': 'no_controller'}))
 

@@ -251,6 +251,7 @@ function showGimbal(state){
  const active=mode==='live'&&showVisibleCamera(),slider=$('gimbalPitch');
  gimbalState=state;visible('gimbalPanel',active);
  if(!active||!state?.ready){gimbalDirty=false;gimbalTargetChosen=false;gimbalMessage='';}
+ if(state?.ready){slider.min=String(state.minimum);slider.max=String(state.maximum);}
  if(state?.ready&&!gimbalTargetChosen){slider.value=String(Math.max(state.minimum,Math.min(state.maximum,state.pitch??0)));}
  msg('gimbalActual',pitchText(state?.pitch));
  msg('gimbalTarget',state?.ready?pitchText(Number(slider.value)):'—');
