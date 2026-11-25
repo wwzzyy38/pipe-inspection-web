@@ -2,6 +2,7 @@ import argparse
 from contextlib import ExitStack
 import ipaddress
 import ssl
+import subprocess
 import socket
 import sys
 import json
@@ -32,7 +33,7 @@ class InspectionHTTP(ThreadingHTTPServer):
     def __init__(self, address, tls, gate, allowed, hostname=None, device=None, workers=None):
         self.tls,self.gate,self.allowed=tls,gate,allowed
         self.scheme='https' if tls else 'http'
-        suffix=f':{address[1]}' if address[1]!=443 else ''
+        suffix=f':{address[1]}' if address[1] != (443 if tls else 80) else ''
         self.host=f'{hostname or address[0]}{suffix}'
         self.hosts={self.host,f'{address[0]}{suffix}'}
         self.workers=workers if workers is not None else threading.BoundedSemaphore(32)
@@ -102,7 +103,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def valid_host(self):
         hosts=self.headers.get_all('Host') or []
-        return len(hosts)==1 and (hosts[0].lower() in self.server.hosts if self.server.tls else LOCAL.fullmatch(hosts[0]))
+        return len(hosts)==1 and (hosts[0].lower() in self.server.hosts if self.server.gate is not None else LOCAL.fullmatch(hosts[0]))
 
     def same_origin(self):
         host=self.headers.get('Host','')
@@ -202,7 +203,10 @@ class Handler(BaseHTTPRequestHandler):
         if path in ASSETS:
             f=ROOT/'static'/ASSETS[path]
             kind=mimetypes.guess_type(f.name)[0] or 'application/octet-stream'
-            self.body(200,kind+('; charset=utf-8' if kind.startswith('text/') else ''),f.read_bytes())
+            data=f.read_bytes()
+            if path=='/' and self.server.gate is not None:
+                data=data.replace(b'</head>',b'<meta name="inspection-auth" content="required">\n</head>',1)
+            self.body(200,kind+('; charset=utf-8' if kind.startswith('text/') else ''),data)
             return
         parts=path.strip('/').split('/')
         if parts==['api','live','status']:
@@ -438,10 +442,23 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(500,{'error':'model launch failed; check logs'})
 
 
+def network_addresses():
+    raw=subprocess.check_output(['ip','-j','-4','addr','show','scope','global','up'],text=True)
+    return {
+        device['ifname']:[ipaddress.IPv4Interface(f"{item['local']}/{item['prefixlen']}")
+                          for item in device.get('addr_info',[]) if item['family']=='inet']
+        for device in json.loads(raw)
+    }
+
+
 def main():
     parser=argparse.ArgumentParser()
     parser.add_argument('--port',type=int,default=18120)
     parser.add_argument('--recordings',default=str(ROOT/'recordings'))
+    parser.add_argument('--auto-wifi',action=argparse.BooleanOptionalAction,default=False,
+                        help='derive the LAN address and subnet from the active Wi-Fi interface')
+    parser.add_argument('--wifi-interface',default=os.environ.get('PIPE_WEB_WIFI_INTERFACE'))
+    parser.add_argument('--http',action='store_true',help='serve authenticated plain HTTP on the private LAN')
     parser.add_argument('--bind',default=os.environ.get('PIPE_WEB_BIND','127.0.0.1'))
     parser.add_argument('--allow',default=os.environ.get('PIPE_WEB_ALLOW'))
     parser.add_argument('--tail-bind',default=os.environ.get('PIPE_WEB_TAIL_BIND'))
@@ -450,22 +467,45 @@ def main():
     parser.add_argument('--key',default=os.environ.get('PIPE_WEB_KEY'))
     parser.add_argument('--password-file',default=os.environ.get('PIPE_WEB_PASSWORD_FILE'))
     args=parser.parse_args()
+    if args.auto_wifi:
+        try:
+            addresses=network_addresses()
+            wifi=[address for name,items in addresses.items()
+                  if (args.wifi_interface==name if args.wifi_interface
+                      else (Path('/sys/class/net')/name/'wireless').is_dir())
+                  for address in items]
+        except (OSError,ValueError,subprocess.CalledProcessError) as exc:
+            parser.error(f'cannot read Wi-Fi addresses: {exc}')
+        if len(wifi)!=1:
+            parser.error('expected one Wi-Fi IPv4 address; connect Wi-Fi or select --wifi-interface/--no-auto-wifi')
+        args.bind,args.allow=str(wifi[0].ip),str(wifi[0].network)
+        tail=addresses.get('tailscale0',[])
+        args.tail_bind=str(tail[0].ip) if tail else None
+    if args.http:
+        args.tail_bind=None
     bind=ipaddress.IPv4Address(args.bind)
     if not 1<=args.port<=65535:parser.error('port must be 1–65535')
     tls=gate=allowed=None
     private=[ipaddress.ip_network(n) for n in ('10.0.0.0/8','172.16.0.0/12','192.168.0.0/16')]
-    if not bind.is_loopback or any((args.cert,args.key,args.password_file,args.allow,args.tail_bind)):
-        if not all((args.cert,args.key,args.password_file,args.allow)):
-            parser.error('non-local listening requires explicit TLS, password file and a subnet')
+    needs_gate=args.http or not bind.is_loopback or any(
+        (args.cert,args.key,args.password_file,args.allow,args.tail_bind))
+    if needs_gate:
+        if not args.password_file or not args.allow:
+            parser.error('LAN listening requires a password file and a private subnet')
         allowed=ipaddress.IPv4Network(args.allow,strict=True)
         if bind not in allowed or not any(allowed.subnet_of(net) for net in private):
             parser.error('bind to one address in an explicit private subnet')
-        if Path(args.key).stat().st_mode & 0o077:parser.error('TLS private key must be owner-only')
-        tls=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);tls.minimum_version=ssl.TLSVersion.TLSv1_2
-        tls.load_cert_chain(args.cert,args.key)
-        gate=PasswordGate(args.password_file)
-    if args.hostname and (not tls or not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9-]{0,62}(?<!-)',args.hostname)):
-        parser.error('hostname must be a single DNS label and requires TLS')
+        if args.http:
+            gate=PasswordGate(args.password_file,cookie_name='pipe_inspection_http',secure=False)
+        else:
+            if not args.cert or not args.key:
+                parser.error('HTTPS requires a TLS certificate and key')
+            if Path(args.key).stat().st_mode & 0o077:parser.error('TLS private key must be owner-only')
+            tls=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);tls.minimum_version=ssl.TLSVersion.TLSv1_2
+            tls.load_cert_chain(args.cert,args.key)
+            gate=PasswordGate(args.password_file)
+    if args.hostname and (gate is None or not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9-]{0,62}(?<!-)',args.hostname)):
+        parser.error('hostname must be a single DNS label on an authenticated listener')
     tailnet=ipaddress.IPv4Network('100.64.0.0/10')
     tail_bind=ipaddress.IPv4Address(args.tail_bind) if args.tail_bind else None
     if tail_bind is not None and (tail_bind not in tailnet or not tls or tail_bind==bind):

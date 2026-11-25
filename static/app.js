@@ -1,6 +1,7 @@
 import {Viewer,names,colors} from './viewer.js';
 const $=id=>document.getElementById(id), player=$('player'), seek=$('seek');
 const viewer=new Viewer($('viewer'));
+const authRequired=!!document.querySelector('meta[name="inspection-auth"]');
 const pitchSetting=Number(document.querySelector('meta[name="inspection-live-pitch-deg"]')?.content);
 const livePitch=Number.isFinite(pitchSetting)&&Math.abs(pitchSetting)<=90?pitchSetting:0;
 let space='body',reference=null,preferredSpace=null,referenceKey='';
@@ -22,8 +23,8 @@ const endpoint=(sid,kind,track)=>`/api/sessions/${encodeURIComponent(sid)}/${kin
 const msg=(id,text)=>{const el=$(id);if(el.textContent!==text)el.textContent=text;};
 const visible=(id,show)=>{$(id).hidden=!show;};
 function connection(state,text){const el=$('connection');if(el.dataset.state!==state)el.dataset.state=state;msg('connection',text);}
-async function get(url){const r=await fetch(url);if(r.status===401&&location.protocol==='https:')location.assign('/login');if(!r.ok)throw Error(`HTTP ${r.status}`);return r.json();}
-if(location.protocol==='https:'){
+async function get(url){const r=await fetch(url);if(r.status===401&&authRequired)location.assign('/login');if(!r.ok)throw Error(`HTTP ${r.status}`);return r.json();}
+if(authRequired){
  visible('signOut',true);
  $('signOut').onclick=async()=>{
   try{const r=await fetch('/logout',{method:'POST',headers:{'X-Inspection-Action':'1'},redirect:'manual'});if(r.type==='opaqueredirect'||r.status===401)location.assign('/login');else connection('error','退出未完成，请重试');}

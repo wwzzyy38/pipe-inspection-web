@@ -42,8 +42,10 @@ def save_password(path, password, *, first=False):
 
 
 class PasswordGate:
-    def __init__(self,path):
+    def __init__(self,path,*,cookie_name=COOKIE,secure=True):
         self.path=Path(path)
+        self.cookie_name=cookie_name
+        self.secure=secure
         self.lock=threading.RLock()
         self.work=threading.BoundedSemaphore(2)
         self.signature=None
@@ -125,11 +127,10 @@ class PasswordGate:
             while len(self.sessions)>128:self.sessions.popitem(last=False)
             return 'ok',token
 
-    @staticmethod
-    def token(header):
+    def token(self, header):
         if not header or len(header)>4096:return ''
         try:
-            jar=SimpleCookie(header); return jar[COOKIE].value if COOKIE in jar else ''
+            jar=SimpleCookie(header); return jar[self.cookie_name].value if self.cookie_name in jar else ''
         except CookieError:return ''
 
     def authorized(self, header):
@@ -144,9 +145,9 @@ class PasswordGate:
     def logout(self, header):
         with self.lock:self.sessions.pop(self.token(header),None)
 
-    @staticmethod
-    def cookie(token,max_age=TTL):
-        return f'{COOKIE}={token}; Path=/; Max-Age={max_age}; Secure; HttpOnly; SameSite=Strict'
+    def cookie(self,token,max_age=TTL):
+        secure = '; Secure' if self.secure else ''
+        return f'{self.cookie_name}={token}; Path=/; Max-Age={max_age}; HttpOnly; SameSite=Strict{secure}'
 
 
 def main():

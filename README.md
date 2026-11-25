@@ -14,7 +14,7 @@
 1. 准备 Ubuntu / JetPack 6 的 ARM64 Jetson、ROS 2 Humble、Python 3.10+、NumPy、PyYAML，以及所需的 ROS 消息包（含 `sensor_msgs`、`nav_msgs`、`mavros_msgs`）、rosbag2 SQLite 插件和 `colcon`。`runtime/` 的机载推理脚本针对 JetPack 6 / CUDA 12.6，不是通用桌面安装器。
 2. 复制 `config.env.example` 到本机 `config.env` 后配置路径。`run.sh` 以仓库目录为工作目录，可复用现有 `~/pipe_ws` 和仓库内 `model_ws` 的 ROS 2 overlay。构建自研节点时，先加载 `/opt/ros/humble/setup.bash`，再在 `model_ws` 执行 `colcon build --packages-select pipe_yolo_recognition pipe_pointcloud_recognition`。
 3. 只需查看数据时可以先不配置模型。要运行推理，另行准备有使用授权的 YOLO26m 权重、PointNeXt-B 方案 2 的第 62 轮权重、匹配平台的 CUDA PyTorch 及该模型所需的 OpenPoints 源码和本机编译算子。`runtime/bootstrap_python.sh` 提供该平台 Python wheel 的参考；`runtime/model_env.sh` 和 `runtime/build_pointops.sh` 假定另行准备了 JetPack 对应的 CUDA 头文件和动态库。不要把别的架构的 Python 环境或 TensorRT 引擎直接复制过来。
-4. 运行 `bash run.sh`。默认访问本机 `http://127.0.0.1:18120/`。需要局域网或 Tailscale 直连时，在 `config.env` 显式设置监听、允许子网、TLS 证书/私钥和密码文件；默认不开放公网。用 `mkdir -p web-security && chmod 700 web-security` 准备私有目录，执行 `python3 web_auth.py web-security/password.json` 无回显设置至少 12 个字符的密码。密码文件、私钥不得放进 Git。
+4. 运行 `bash run.sh`。默认访问本机 `http://127.0.0.1:18120/`。需要局域网或 Tailscale 直连时，在 `config.env` 显式设置监听、允许子网、TLS 证书/私钥和密码文件；默认不开放公网。用 `mkdir -p web-security && chmod 700 web-security` 准备私有目录，执行 `python3 web_auth.py web-security/password.json` 无回显设置至少 12 个字符的密码。密码文件、私钥不得放进 Git。在受信任的局域网需要免证书 HTTP 访问时，可显式运行 `bash run.sh --http`（配合 `config.env` 或 `--auto-wifi` 自动读取当前 Wi-Fi 网卡地址与子网；多网卡可传 `--wifi-interface`）。HTTP 模式仍强制密码登录且仅监听私有局域网（不启用 Tailscale 监听），会话和密码明文传输，默认 HTTPS 行为不变。
 
 ### Jetson03 一键启动预览
 
