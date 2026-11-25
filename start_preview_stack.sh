@@ -57,7 +57,7 @@ fi
 for command in ip ss timeout grep; do
     command -v "$command" >/dev/null || fail "$command is missing"
 done
-for file in "$ros_setup" "$siyi_setup" "$thermal_setup" "$livox_setup" "$fastlio_setup" "$pipe_setup" "$app_dir/run.sh"; do
+for file in "$ros_setup" "$siyi_setup" "$thermal_setup" "$livox_setup" "$fastlio_setup" "$pipe_setup" "$app_dir/run.sh" "$app_dir/launch/siyi_pitch.launch.py"; do
     [[ -r "$file" ]] || fail "missing or unreadable: $file"
 done
 
@@ -122,8 +122,15 @@ lidar=$(tmux split-window -v -d -P -F '#{pane_id}' -t "$thermal" /bin/bash --nop
 tmux respawn-pane -k -t "$web" /bin/bash -c 'exec /bin/bash "$1"' web "$app_dir/run.sh"
 tmux respawn-pane -k -t "$siyi" /bin/bash -c '
     set -eo pipefail; source "$1"; source "$2"
-    exec ros2 run siyi_a2_mini image_node --ros-args -r __ns:=/siyi -p rtsp_url:=rtsp://192.168.144.25:8554/main.264 -p publish_fps:=15.0
-' siyi "$ros_setup" "$siyi_setup"
+    pids=()
+    cleanup() { kill "${pids[@]}" 2>/dev/null || true; }
+    trap cleanup EXIT INT TERM
+    ros2 run siyi_a2_mini image_node --ros-args -r __ns:=/siyi -p rtsp_url:=rtsp://192.168.144.25:8554/main.264 -p publish_fps:=15.0 &
+    pids+=($!)
+    ros2 launch "$3" &
+    pids+=($!)
+    wait -n
+' siyi "$ros_setup" "$siyi_setup" "$app_dir/launch/siyi_pitch.launch.py"
 tmux respawn-pane -k -t "$thermal" /bin/bash -c '
     set -eo pipefail; source "$1"; source "$2"
     exec ros2 launch thermal_imager thermal_imager.launch.py

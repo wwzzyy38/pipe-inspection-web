@@ -18,7 +18,7 @@
 
 ### Jetson03 一键启动预览
 
-`start_preview_stack.sh` 在同一个 tmux 窗口分四格启动网页、SIYI 可见光、红外、Livox + FAST‑LIO。它沿用设备已经配置的三个传感器网口和 `config.env`，不会重配网络。使用前应停掉已有预览或实飞任务；脚本检测到冲突时会退出，不会替你关闭它们。
+`start_preview_stack.sh` 在同一个 tmux 窗口分四格启动网页、SIYI 可见光与云台俯仰控制（`launch/siyi_pitch.launch.py`）、红外、Livox + FAST‑LIO。它沿用设备已经配置的三个传感器网口和 `config.env`，不会重配网络。使用前应停掉已有预览或实飞任务；脚本检测到冲突时会退出，不会替你关闭它们。
 
 ```bash
 bash start_preview_stack.sh --check
@@ -27,7 +27,7 @@ bash start_preview_stack.sh
 
 `--check` 只检查依赖，不启动节点。加 `--detach` 可让进程留在后台；用 `tmux attach-session -t pipe_preview` 看四格日志。再次运行进入已有会话，不会重复启动；需要停止这四格时执行 `tmux kill-session -t '=pipe_preview'`。
 
-此脚本不启动 MAVROS、PX4 位姿桥、飞行任务、录制或云台控制。YOLO 和 PointNeXt 仍从网页按需启动；没有飞控遥测时，离线预测仍受现有落地确认或台架条件限制。
+此脚本不启动 MAVROS、PX4 位姿桥、飞行任务或录制。YOLO 和 PointNeXt 仍从网页按需启动；没有飞控遥测时，离线预测仍受现有落地确认或台架条件限制。
 
 ### 云台俯仰控制（可选）
 
