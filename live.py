@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import signal
 import subprocess
@@ -14,6 +15,9 @@ TOPICS={'video':'/siyi/camera/image_raw/compressed','yolo':'/pipe_yolo/image/com
         'cloud':'/cloud_registered_body','segment':'/pipe_pointcloud/segmented',
         'detections':'/pipe_yolo/detections','summary':'/pipe_pointcloud/summary'}
 JPEG_FEEDS={'video','yolo','thermal'}
+GIMBAL_MIN, GIMBAL_MAX = -25, 25
+GIMBAL_FEEDBACK_TTL = 2.0
+GIMBAL_COMMAND_INTERVAL = .4
 MODELS={'yolo':('pipe_yolo_recognition','video'), 'segment':('pipe_pointcloud_recognition','cloud')}
 CONFIG={
     'yolo': [('python_executable','PIPE_YOLO_PYTHON','yolo-venv/bin/python'),('model','PIPE_YOLO_MODEL','pipe_inspection_web/assets/weights/yolo26m.pt')],
@@ -30,6 +34,10 @@ class Live:
         self.last,self.proc,self.exits={},{},{}
         self.lock=threading.RLock()
         self.flight=FlightState(self.lock)
+        self.gimbal_command=None
+        self.gimbal_pitch=None
+        self.gimbal_connected=None
+        self.gimbal_last_sent=-math.inf
         self.poses={};self.anchor=None;self.ref_version=0
         self.cloud_stamp=0;self.cloud_at=0.0;self.odom_at=0.0
         self.done=threading.Event()
@@ -44,7 +52,7 @@ class Live:
             from rclpy.executors import SingleThreadedExecutor
             from rclpy.qos import QoSProfile, ReliabilityPolicy
             from sensor_msgs.msg import CompressedImage,PointCloud2
-            from std_msgs.msg import String
+            from std_msgs.msg import Bool, Float64, String
             ctx=Context()
             rclpy.init(context=ctx)
             node=rclpy.create_node('pipe_inspection_web',context=ctx,enable_rosout=False)
@@ -54,6 +62,9 @@ class Live:
                 node.create_subscription(msg,topic,lambda m,k=k:self.collect(k,m),qos)
             from nav_msgs.msg import Odometry
             node.create_subscription(Odometry,ODOM_TOPIC,self.collect_pose,qos)
+            self.gimbal_command=node.create_publisher(Float64,'/siyi/gimbal/set_pitch_deg',1)
+            node.create_subscription(Float64,'/siyi/gimbal/pitch_deg',self.collect_gimbal_pitch,qos)
+            node.create_subscription(Bool,'/siyi/gimbal/connected',self.collect_gimbal_connection,qos)
             self.flight.subscribe(node,qos)
             executor=SingleThreadedExecutor(context=ctx)
             executor.add_node(node)
@@ -71,7 +82,9 @@ class Live:
         except Exception as exc:
             self.problem=f'{type(exc).__name__}: {exc}'
         finally:
-            self.ready=False
+            with self.lock:
+                self.ready=False
+                self.gimbal_command=None
             if node is not None:
                 node.destroy_node()
             if ctx is not None and ctx.ok():
@@ -195,13 +208,48 @@ class Live:
         return dict(state=state,owned=bool(rec),external=bool(external and not rec),source=valid,missing=missing,
                     exit=self.exits.get(k),canStart=bool(self.ready and valid and not missing and not rec and not external and time.monotonic()-self.graph_at < 3))
 
+    def collect_gimbal_pitch(self, msg):
+        with self.lock:
+            self.gimbal_pitch=(time.monotonic(),msg.data) if math.isfinite(msg.data) else None
+
+    def collect_gimbal_connection(self, msg):
+        with self.lock:
+            self.gimbal_connected=(time.monotonic(),msg.data)
+            if not msg.data:self.gimbal_pitch=None
+
+    def gimbal_status(self):
+        # The caller holds self.lock to keep the feedback and publisher state consistent.
+        now=time.monotonic()
+        pitch=self.gimbal_pitch
+        connected=self.gimbal_connected
+        online=bool(connected and connected[1] and now-connected[0]<GIMBAL_FEEDBACK_TTL)
+        fresh=bool(pitch and now-pitch[0]<GIMBAL_FEEDBACK_TTL and online)
+        controller=self.ready and self.gimbal_command is not None and self.gimbal_command.get_subscription_count()>0
+        reason='ready' if controller and fresh else 'no_controller' if not controller else 'no_feedback'
+        return dict(ready=reason=='ready',reason=reason,pitch=pitch[1] if fresh else None,
+                    minimum=GIMBAL_MIN,maximum=GIMBAL_MAX)
+
+    def set_gimbal_pitch(self, angle):
+        if type(angle) not in (int,float) or not GIMBAL_MIN <= angle <= GIMBAL_MAX:
+            return False,'invalid_angle'
+        with self.lock:
+            state=self.gimbal_status()
+            if not state['ready']:return False,state['reason']
+            now=time.monotonic()
+            if now-self.gimbal_last_sent<GIMBAL_COMMAND_INTERVAL:return False,'rate_limited'
+            from std_msgs.msg import Float64
+            try:self.gimbal_command.publish(Float64(data=float(angle)))
+            except (OSError,RuntimeError):return False,'publish_failed'
+            self.gimbal_last_sent=now
+            return True,'sent'
+
     def status(self):
         with self.lock:
             feeds={}
             for k in TOPICS:
                 r=self.last.get(k)
                 feeds[k]=dict(available=bool(self.frame(k)),publisher=k in self.pubs,version=str(r[1]) if r else None,**(r[3] if r else {}))
-            return dict(ros=self.ready,problem=self.problem,feeds=feeds,reference=dict(available=self.reference_available(),version=self.ref_version,source='live'),models={k:self.check(k) for k in MODELS})
+            return dict(ros=self.ready,problem=self.problem,feeds=feeds,gimbal=self.gimbal_status(),reference=dict(available=self.reference_available(),version=self.ref_version,source='live'),models={k:self.check(k) for k in MODELS})
 
     def control(self,k,action):
         with self.lock:

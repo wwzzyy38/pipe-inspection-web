@@ -101,9 +101,19 @@ export class Viewer {
  }
  reset(){this.pan=[0,0];this.zoom=1;this.fit();this.view('oblique');}
  clear(refit=false){this.count=0;this.frameData=null;if(refit)this.fitted=false;this.draw();}
- set(buf){
-  if(buf.byteLength<8)throw Error('无效点云帧');const d=new DataView(buf);const n=d.getUint32(4,true);
+ set(buf,displayPitchDeg=0){
+  if(buf.byteLength<8)throw Error('无效点云帧');let d=new DataView(buf);const n=d.getUint32(4,true);
   if(d.getUint32(0,true)!==0x31435750||n>30000||8+16*n!==buf.byteLength)throw Error('不支持的点云帧');
+  if(displayPitchDeg){
+   // Rotate only the displayed points about +Y. Keep the original frame and its point attributes.
+   buf=buf.slice(0);d=new DataView(buf);
+   const angle=displayPitchDeg*Math.PI/180,c=Math.cos(angle),s=Math.sin(angle);
+   for(let i=0;i<n;i++){
+    const p=8+i*16,x=d.getFloat32(p,true),z=d.getFloat32(p+8,true);
+    d.setFloat32(p,c*x+s*z,true);d.setFloat32(p+8,-s*x+c*z,true);
+   }
+  }
+  if(displayPitchDeg!==this.displayPitchDeg){this.displayPitchDeg=displayPitchDeg;this.fitted=false;}
   const stats=Array(8).fill(0);
   for(let i=0;i<n;i++){const p=8+16*i,k=d.getUint8(p+15);if(k<8){stats[k]++;for(let c=0;c<3;c++)d.setUint8(p+12+c,parseInt(colors[k].slice(1+c*2,3+c*2),16));}}
   this.count=n;this.frameData=d;if(!this.fitted)this.fit();

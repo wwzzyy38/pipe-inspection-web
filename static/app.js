@@ -1,8 +1,11 @@
 import {Viewer,names,colors} from './viewer.js';
 const $=id=>document.getElementById(id), player=$('player'), seek=$('seek');
 const viewer=new Viewer($('viewer'));
+const pitchSetting=Number(document.querySelector('meta[name="inspection-live-pitch-deg"]')?.content);
+const livePitch=Number.isFinite(pitchSetting)&&Math.abs(pitchSetting)<=90?pitchSetting:0;
 let space='body',reference=null,preferredSpace=null,referenceKey='';
 let mode='replay', sessions=[],session=null,selected='', selection=0,mediaEpoch=0;
+let gimbalState=null,gimbalDirty=false,gimbalTargetChosen=false,gimbalSending=false,gimbalMessage='';
 let ct=null,vt=null,position=0,playing=false,lastTick=0,frameIndex=-2,loading=null,lastFetch=0;
 let scrub=null,exact=null,failedIndex=-2,cachedBytes=0;
 const frames=new Map();
@@ -29,7 +32,12 @@ if(location.protocol==='https:'){
 }
 function options(id,choices,wanted=''){const n=$(id);n.replaceChildren(...choices.map(([v,t])=>new Option(t,v)));if(choices.some(([v])=>v===wanted))n.value=wanted;n.disabled=!choices.length;}
 function emptyCloud(text,refit=false){viewer.clear(refit);msg('cloudEmpty',text);visible('cloudEmpty',true);visible('legend',false);}
-function draw(buf,meta,segmented){viewer.setReference(space==='start'&&$('showGrid').checked);const {n,stats}=viewer.set(buf);msg('cloudMeta',`${locale(n)} 点 / ${meta}`);visible('cloudEmpty',!n||!viewer.gl);msg('cloudEmpty',viewer.gl?'此帧没有可显示的点':'浏览器的 WebGL 不可用');
+function draw(buf,meta,segmented){
+ const angle=mode==='live'?livePitch:0;
+ viewer.setReference(space==='start'&&$('showGrid').checked);
+ const {n,stats}=viewer.set(buf,angle);
+ const correction=angle?` / 显示俯仰补偿 ${angle>0?'+':''}${angle}°`:'';
+ msg('cloudMeta',`${locale(n)} 点 / ${meta}${correction}`);visible('cloudEmpty',!n||!viewer.gl);msg('cloudEmpty',viewer.gl?'此帧没有可显示的点':'浏览器的 WebGL 不可用');
  const legend=$('legend');legend.replaceChildren();visible('legend',segmented&&n>0);if(!segmented)return;
  for(const [i,label] of names.entries()){if(!stats[i])continue;const span=document.createElement('span'),svg=document.createElementNS('http://www.w3.org/2000/svg','svg'),dot=document.createElementNS(svg.namespaceURI,'circle');svg.setAttribute('viewBox','0 0 10 10');svg.setAttribute('width','10');svg.setAttribute('height','10');dot.setAttribute('cx','5');dot.setAttribute('cy','5');dot.setAttribute('r','4');dot.setAttribute('fill',colors[i]);svg.append(dot);span.append(svg,`${label} ${locale(stats[i])}`);legend.append(span);}
  if(!legend.childElementCount)visible('legend',false);
@@ -235,9 +243,38 @@ $('play').onclick=async()=>{
 $('speed').onchange=()=>{player.playbackRate=Number($('speed').value);};$('reset').onclick=()=>viewer.reset();$('reload').onclick=reload;
 player.addEventListener('loadedmetadata',()=>{if(vt&&mode==='replay'){msg('videoMeta',`${vt.label} / ${player.videoWidth}×${player.videoHeight}`);updateTime();}});
 player.addEventListener('error',()=>{if(mode==='replay'&&vt){msg('videoMeta','无法播放。请检查视频文件和编码（推荐 H.264 MP4）。');}});
+const gimbalHints={no_controller:'云台控制节点未启动。',no_feedback:'云台离线或反馈已过期。',
+ invalid_angle:'目标角度超出限位。',rate_limited:'发送过快，请稍后再试。',publish_failed:'未能发送角度，请检查云台连接。'};
+const pitchText=value=>Number.isFinite(value)?`${value.toFixed(1)}°`:'—';
+function showGimbal(state){
+ const active=mode==='live'&&showVisibleCamera(),slider=$('gimbalPitch');
+ gimbalState=state;visible('gimbalPanel',active);
+ if(!active||!state?.ready){gimbalDirty=false;gimbalTargetChosen=false;gimbalMessage='';}
+ if(state?.ready&&!gimbalTargetChosen){slider.value=String(Math.max(state.minimum,Math.min(state.maximum,state.pitch??0)));}
+ msg('gimbalActual',pitchText(state?.pitch));
+ msg('gimbalTarget',state?.ready?pitchText(Number(slider.value)):'—');
+ slider.disabled=!active||!state?.ready||gimbalSending;
+ $('gimbalApply').disabled=slider.disabled||!gimbalDirty;
+ msg('gimbalHint',gimbalSending?'正在发送目标角度…':state?.ready?(gimbalMessage||'拖动选择目标角度，再点应用。'):(gimbalHints[state?.reason]||'等待云台反馈。'));
+}
+$('gimbalPitch').oninput=()=>{
+ if($('gimbalPitch').disabled)return;
+ gimbalDirty=true;gimbalTargetChosen=true;gimbalMessage='';showGimbal(gimbalState);
+};
+$('gimbalApply').onclick=async()=>{
+ if(mode!=='live'||!showVisibleCamera()||!gimbalState?.ready||!gimbalDirty||gimbalSending)return;
+ const angle=Number($('gimbalPitch').value);gimbalSending=true;showGimbal(gimbalState);
+ try{
+  const r=await fetch('/api/control/gimbal/pitch',{method:'POST',headers:{'X-Inspection-Action':'1','Content-Type':'application/json'},body:JSON.stringify({angle})});
+  const d=await r.json();gimbalMessage=r.ok&&d.ok?`已发送 ${pitchText(angle)}，以当前角度反馈为准。`:(gimbalHints[d.detail]||'命令未发送，请重试。');
+  // Keep the requested angle visible, but require a fresh slider change before sending again.
+  if(r.ok&&d.ok)gimbalDirty=false;
+ }catch{gimbalMessage='与飞机网页的连接中断，未确认发送。';}
+ finally{gimbalSending=false;showGimbal(gimbalState);}
+};
 const stateText={online:'输出在线',not_configured:'未配置',starting:'正在启动',waiting:'等待输出',stale:'输出过期',failed:'进程失败',no_source:'等待输入',idle:'待启动',ros_unavailable:'ROS 未连接'};
 function selectMode(which){if(mode===which)return;mode=which;liveEpoch++;mediaEpoch++;resetFrameQueue();space='body';reference=null;preferredSpace=null;referenceKey='';referenceUI();clearVideo();clearImage();clearInfrared();emptyCloud('等待数据…',true);viewer.reset();lastCloud='';lastImage='';
- const live=mode==='live';$('tabReplay').setAttribute('aria-pressed',String(!live));$('tabLive').setAttribute('aria-pressed',String(live));for(const id of ['library','replayNote','timeline'])visible(id,!live);visible('modelPanel',live);visible('badge',false);visible('predictionPanel',false);updateDownloads();
+ const live=mode==='live';$('tabReplay').setAttribute('aria-pressed',String(!live));$('tabLive').setAttribute('aria-pressed',String(live));for(const id of ['library','replayNote','timeline'])visible(id,!live);visible('modelPanel',live);visible('badge',false);visible('predictionPanel',false);updateDownloads();showGimbal(null);
  msg('title',live?'实时识别':'记录回放');msg('subtitle',live?'查看机载相机、点云与实时识别输出。':'选择会话，回看管内图像和三维点云。');
  if(live){options('cloudTrack',[['cloud','原始点云'],['segment','分割结果']]);options('videoTrack',[['video','原始画面'],['yolo','YOLO 结果']]);renderModels();livePoll();}else choose(selected);
 }
@@ -259,6 +296,7 @@ function setSensorView(next){
  visible('radarPanel',showsRadar());
  visible('visiblePanel',showVisibleCamera());
  visible('infraredPanel',showInfraredCamera());
+ showGimbal(gimbalState);
  for(const button of sensorButtons)button.setAttribute('aria-pressed',String(button.dataset.sensorView===next));
  if(mode==='live'){
   liveEpoch++;
@@ -285,7 +323,7 @@ function renderModels(){if(!liveInfo)return;const root=$('modelRows');for(const 
 async function control(key,act,b){b.disabled=true;try{const r=await fetch(`/api/control/${key}/${act}`,{method:'POST',headers:{'X-Inspection-Action':'1'}});const j=await r.json();msg('modelNote',r.ok?(act==='start'?'启动请求已提交，等待实际输出。':'工作台启动的进程已停止。'):`未执行：${stateText[j.detail]||j.detail||j.error}`);if(r.ok&&act==='start')$(key==='yolo'?'videoTrack':'cloudTrack').value=key;}catch{msg('modelNote','无法提交操作，请检查连接。');}finally{b.disabled=false;livePoll();}}
 async function livePoll(){
  if(busy||mode!=='live')return;busy=true;const epoch=liveEpoch;
- try{const st=await get('/api/live/status');if(epoch!==liveEpoch||mode!=='live')return;liveInfo=st;renderModels();
+ try{const st=await get('/api/live/status');if(epoch!==liveEpoch||mode!=='live')return;liveInfo=st;renderModels();showGimbal(st.gimbal);
   const r=st.reference,key=`${r?.available}/${r?.version}`;
   if(key!==referenceKey){
    referenceKey=key;const hadReference=reference?.available;reference=r;
@@ -302,7 +340,7 @@ async function livePoll(){
    showInfraredCamera()&&fetchLatest('thermal',ir,lastInfrared,(b,id)=>showInfrared(b,id,ir),()=>infraredUnavailable(ir)).catch(()=>{
     if(epoch===liveEpoch&&mode==='live')infraredUnavailable(ir);
    })]);
- }catch{if(mode==='live'){connection('error','与飞机网页的连接中断');msg('modelNote','恢复连接后可重试。');clearImage();visible('videoEmpty',true);msg('videoEmpty','连接中断');infraredUnavailable(null);msg('infraredMeta','与飞机网页的连接中断');emptyCloud('连接中断');lastCloud='';lastImage='';}}
+ }catch{if(mode==='live'){connection('error','与飞机网页的连接中断');msg('modelNote','恢复连接后可重试。');showGimbal(null);clearImage();visible('videoEmpty',true);msg('videoEmpty','连接中断');infraredUnavailable(null);msg('infraredMeta','与飞机网页的连接中断');emptyCloud('连接中断');lastCloud='';lastImage='';}}
  finally{busy=false;}
 }
 const predWords={

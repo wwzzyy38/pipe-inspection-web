@@ -375,6 +375,23 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(chunk)
                 remaining-=len(chunk)
 
+    def gimbal_pitch_request(self):
+        self.close_connection=True
+        if self.server.gate is None:
+            self.reply(401,{'error':'login required for gimbal control'});return
+        lengths=self.headers.get_all('Content-Length') or []
+        if (len(lengths)!=1 or not re.fullmatch(r'[0-9]{1,3}',lengths[0]) or not 0<int(lengths[0])<=256
+            or self.headers.get('Transfer-Encoding') or self.headers.get_content_type()!='application/json'):
+            self.reply(400,{'error':'invalid gimbal command body'});return
+        try:
+            data=json.loads(self.rfile.read(int(lengths[0])).decode('utf-8'))
+            if not isinstance(data,dict) or set(data)!={'angle'}:raise ValueError('invalid angle fields')
+        except (ValueError,RecursionError):
+            self.reply(400,{'error':'invalid gimbal command body'});return
+        ok,detail=self.server.live.set_gimbal_pitch(data['angle'])
+        status={'invalid_angle':400,'rate_limited':429,'publish_failed':503}.get(detail,409)
+        self.reply(200 if ok else status,{'ok':ok,'detail':detail})
+
     def do_POST(self):
         if not self.valid_host() or not self.same_origin():
             self.close_connection=True
@@ -390,6 +407,8 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection=True;self.reply(403,{'error':'action header required'});return
         if gate is not None and not gate.authorized(self.headers.get('Cookie')):
             self.close_connection=True;self.reply(401,{'error':'login required'});return
+        if path=='/api/control/gimbal/pitch':
+            self.gimbal_pitch_request();return
         if gate is not None and path=='/logout':
             if self.headers.get_all('Content-Length',[ '0' ])!=['0'] or self.headers.get('Transfer-Encoding'):
                 self.close_connection=True;self.reply(400,{'error':'no body expected'});return

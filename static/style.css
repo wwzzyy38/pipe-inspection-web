@@ -260,3 +260,13 @@ h2 { font-size: .98rem; }
   .top-access { grid-column: 1; grid-row: 2; justify-content: flex-start; }
   .mode-switch { grid-row: 3; }
 }
+
+/* SIYI pitch: the slider chooses a target; only Apply sends it. */
+.gimbal-controls { display: grid; gap: 6px; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+.gimbal-heading, .gimbal-adjustment { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.gimbal-heading { justify-content: space-between; }
+.gimbal-heading label { font-weight: 650; }
+.gimbal-adjustment input { flex: 1 1 10rem; min-width: 0; min-height: 28px; margin: 0; accent-color: var(--accent); }
+.gimbal-controls span, .gimbal-controls p { color: var(--muted); font-size: .81rem; }
+.gimbal-controls output { display: inline-block; min-width: 4.5ch; color: var(--ink); font-variant-numeric: tabular-nums; }
+.gimbal-adjustment button { color: var(--accent-dark); white-space: nowrap; }
