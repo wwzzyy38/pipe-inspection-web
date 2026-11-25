@@ -30,8 +30,9 @@ KINDS={**dict.fromkeys(JPEG_FEEDS, 'image/jpeg'), 'cloud':'application/octet-str
        'detections':'application/json','summary':'application/json'}
 
 class InspectionHTTP(ThreadingHTTPServer):
-    def __init__(self, address, tls, gate, allowed, hostname=None, device=None, workers=None):
+    def __init__(self, address, tls, gate, allowed, hostname=None, device=None, workers=None, allow_http=False):
         self.tls,self.gate,self.allowed=tls,gate,allowed
+        self.allow_http=allow_http
         self.scheme='https' if tls else 'http'
         suffix=f':{address[1]}' if address[1] != (443 if tls else 80) else ''
         self.host=f'{hostname or address[0]}{suffix}'
@@ -58,7 +59,17 @@ class InspectionHTTP(ThreadingHTTPServer):
 
     def process_request_thread(self, request, client_address):
         try:
-            if self.tls:
+            use_tls=bool(self.tls)
+            if self.tls and self.allow_http:
+                try:
+                    request.settimeout(5)
+                    head=request.recv(1,socket.MSG_PEEK)
+                    if not head:
+                        request.close();return
+                    use_tls=head[0]==0x16
+                except (OSError,TimeoutError):
+                    request.close();return
+            if use_tls:
                 try:
                     request.settimeout(5)
                     request=self.tls.wrap_socket(request,server_side=True)
@@ -105,9 +116,17 @@ class Handler(BaseHTTPRequestHandler):
         hosts=self.headers.get_all('Host') or []
         return len(hosts)==1 and (hosts[0].lower() in self.server.hosts if self.server.gate is not None else LOCAL.fullmatch(hosts[0]))
 
+    @property
+    def is_tls(self):
+        return isinstance(self.connection,ssl.SSLSocket)
+
+    @property
+    def request_scheme(self):
+        return 'https' if self.is_tls else 'http'
+
     def same_origin(self):
         host=self.headers.get('Host','')
-        return self.headers.get_all('Origin')==[f'{self.server.scheme}://{host}']
+        return self.headers.get_all('Origin')==[f'{self.request_scheme}://{host}']
 
     def redirect(self, location, cookie=None):
         headers={'Location':location}
@@ -141,7 +160,7 @@ class Handler(BaseHTTPRequestHandler):
         try:password=self.read_form(('password',))[0].encode('utf-8')
         except ValueError:self.reply(400,{'error':'invalid login form'});return
         result,token=self.server.gate.login(self.client_address[0],password)
-        if token is not None:self.redirect('/',self.server.gate.cookie(token))
+        if token is not None:self.redirect('/',self.server.gate.cookie(token,secure=self.is_tls))
         else:self.login_page({'unconfigured':503,'incorrect':401,'limited':429}[result],result)
 
     def setup_allowed(self):
@@ -174,7 +193,7 @@ class Handler(BaseHTTPRequestHandler):
             path=urlsplit(self.path).path
             gate=self.server.gate
             if gate is not None and path!='/style.css':
-                allowed=gate.authorized(self.headers.get('Cookie'))
+                allowed=gate.authorized(self.headers.get('Cookie'),secure=self.is_tls)
                 if path=='/setup':
                     if self.setup_allowed():self.setup_page()
                     else:self.reply(403,{'error':'first-time setup is not authorized'})
@@ -409,14 +428,14 @@ class Handler(BaseHTTPRequestHandler):
             self.login_request();return
         if self.headers.get_all('X-Inspection-Action')!=['1']:
             self.close_connection=True;self.reply(403,{'error':'action header required'});return
-        if gate is not None and not gate.authorized(self.headers.get('Cookie')):
+        if gate is not None and not gate.authorized(self.headers.get('Cookie'),secure=self.is_tls):
             self.close_connection=True;self.reply(401,{'error':'login required'});return
         if path=='/api/control/gimbal/pitch':
             self.gimbal_pitch_request();return
         if gate is not None and path=='/logout':
             if self.headers.get_all('Content-Length',[ '0' ])!=['0'] or self.headers.get('Transfer-Encoding'):
                 self.close_connection=True;self.reply(400,{'error':'no body expected'});return
-            gate.logout(self.headers.get('Cookie'));self.redirect('/login',gate.cookie('',0));return
+            gate.logout(self.headers.get('Cookie'),secure=self.is_tls);self.redirect('/login',gate.cookie('',0,secure=self.is_tls));return
         p=path.strip('/').split('/')
         live=len(p)==4 and p[:2]==['api','control'] and p[2] in MODELS and p[3] in ('start','stop')
         offline=len(p)==5 and p[:2]==['api','sessions'] and p[3]=='prediction' and p[4] in ('start','start-bench','cancel')
@@ -459,6 +478,8 @@ def main():
                         help='derive the LAN address and subnet from the active Wi-Fi interface')
     parser.add_argument('--wifi-interface',default=os.environ.get('PIPE_WEB_WIFI_INTERFACE'))
     parser.add_argument('--http',action='store_true',help='serve authenticated plain HTTP on the private LAN')
+    parser.add_argument('--allow-http',action=argparse.BooleanOptionalAction,default=False,
+                        help='also accept authenticated plain HTTP on the TLS port')
     parser.add_argument('--bind',default=os.environ.get('PIPE_WEB_BIND','127.0.0.1'))
     parser.add_argument('--allow',default=os.environ.get('PIPE_WEB_ALLOW'))
     parser.add_argument('--tail-bind',default=os.environ.get('PIPE_WEB_TAIL_BIND'))
@@ -513,12 +534,13 @@ def main():
     catalog=Catalog(args.recordings)
     hostname=args.hostname.lower() if args.hostname else None
     worker_slots=threading.BoundedSemaphore(32)
+    allow_http=bool(tls and args.allow_http)
     with ExitStack() as stack:
-        primary=stack.enter_context(InspectionHTTP((str(bind),args.port),tls,gate,allowed,hostname,workers=worker_slots))
+        primary=stack.enter_context(InspectionHTTP((str(bind),args.port),tls,gate,allowed,hostname,workers=worker_slots,allow_http=allow_http))
         servers=[primary]
         if tail_bind is not None:
             try:
-                tail=InspectionHTTP((str(tail_bind),args.port),tls,gate,tailnet,hostname,device='tailscale0',workers=worker_slots)
+                tail=InspectionHTTP((str(tail_bind),args.port),tls,gate,tailnet,hostname,device='tailscale0',workers=worker_slots,allow_http=allow_http)
             except OSError as exc:
                 print(f'Tailscale listener unavailable: {exc}; keeping LAN only',file=sys.stderr,flush=True)
             else:
@@ -535,6 +557,8 @@ def main():
         signal.signal(signal.SIGINT,stop)
         for server in servers:
             print(f'Inspection web: {server.scheme}://{server.host} on {server.server_address[0]}',flush=True)
+            if server.tls and server.allow_http:
+                print(f'Inspection web: http://{server.host} on {server.server_address[0]}',flush=True)
         threads=[threading.Thread(target=s.serve_forever,daemon=True) for s in servers[1:]]
         for thread in threads:thread.start()
         try:

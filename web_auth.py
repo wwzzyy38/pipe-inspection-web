@@ -42,9 +42,10 @@ def save_password(path, password, *, first=False):
 
 
 class PasswordGate:
-    def __init__(self,path,*,cookie_name=COOKIE,secure=True):
+    def __init__(self,path,*,cookie_name=COOKIE,http_cookie_name='pipe_inspection_http',secure=True):
         self.path=Path(path)
         self.cookie_name=cookie_name
+        self.http_cookie_name=http_cookie_name
         self.secure=secure
         self.lock=threading.RLock()
         self.work=threading.BoundedSemaphore(2)
@@ -127,14 +128,19 @@ class PasswordGate:
             while len(self.sessions)>128:self.sessions.popitem(last=False)
             return 'ok',token
 
-    def token(self, header):
+    def cookie_for(self, secure=None):
+        use_secure=self.secure if secure is None else secure
+        return self.cookie_name if use_secure else (self.http_cookie_name or self.cookie_name)
+
+    def token(self, header, *, secure=None):
         if not header or len(header)>4096:return ''
+        name=self.cookie_for(secure)
         try:
-            jar=SimpleCookie(header); return jar[self.cookie_name].value if self.cookie_name in jar else ''
+            jar=SimpleCookie(header); return jar[name].value if name in jar else ''
         except CookieError:return ''
 
-    def authorized(self, header):
-        token=self.token(header)
+    def authorized(self, header, *, secure=None):
+        token=self.token(header,secure=secure)
         with self.lock:
             self.reload()
             expires=self.sessions.get(token,0)
@@ -142,12 +148,14 @@ class PasswordGate:
             self.sessions.pop(token,None)
             return False
 
-    def logout(self, header):
-        with self.lock:self.sessions.pop(self.token(header),None)
+    def logout(self, header, *, secure=None):
+        with self.lock:self.sessions.pop(self.token(header,secure=secure),None)
 
-    def cookie(self,token,max_age=TTL):
-        secure = '; Secure' if self.secure else ''
-        return f'{self.cookie_name}={token}; Path=/; Max-Age={max_age}; HttpOnly; SameSite=Strict{secure}'
+    def cookie(self,token,max_age=TTL,*,secure=None):
+        use_secure=self.secure if secure is None else secure
+        name=self.cookie_for(use_secure)
+        suffix='; Secure' if use_secure else ''
+        return f'{name}={token}; Path=/; Max-Age={max_age}; HttpOnly; SameSite=Strict{suffix}'
 
 
 def main():
